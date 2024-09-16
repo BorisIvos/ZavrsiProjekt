@@ -1,0 +1,370 @@
+AWSTemplateFormatVersion: 2010-09-09
+Parameters:
+
+  KeyPairName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: Name of an existing EC2 Key Pair to enable SSH access to the instance
+Resources:
+# EC2-Autoscaling
+# --------------------------------------------------------------------------------------------------------
+  MySecurityGroup1:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Otvori samo sigurne portove za EC2
+      SecurityGroupIngress:
+        - CidrIp: 0.0.0.0/0
+          IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+        - CidrIp: 0.0.0.0/0
+          IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+      VpcId: vpc-0f8a463d3c84ab974
+      Tags: 
+        - Key: Name
+          Value: ASSecurityGroup  
+
+  MyLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: MyLaunchTemplate1
+      VersionDescription: Initial version
+      LaunchTemplateData:
+        ImageId: ami-06dd92ecc74fdfb36
+        InstanceType: t2.micro
+        SecurityGroupIds:
+          - !Ref MySecurityGroup1
+        BlockDeviceMappings:
+          - DeviceName: /dev/sda1
+            Ebs:
+              Encrypted: true
+              KmsKeyId: !Ref EC2KMSKey
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash -x
+            apt-get update
+            apt-get install -y curl nfs-common
+            EC2_REGION=${AWS::Region}
+            DIR_TGT=/mnt/efs/
+            EFS_FILE_SYSTEM_ID=${MyEFSFileSystem}
+            mkdir -p $DIR_TGT
+            DIR_SRC=$EFS_FILE_SYSTEM_ID.efs.$EC2_REGION.amazonaws.com
+            mount -t nfs4 -o nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2 $DIR_SRC:/ $DIR_TGT
+            apt-get install -y software-properties-common
+            add-apt-repository -y ppa:ondrej/php
+            apt-get update
+            apt-get install -y apache2 php8.1 libapache2-mod-php8.1 php8.1-mysql
+            apt-get install -y mysql-server
+            service apache2 start
+            a2enmod php8.1
+            systemctl restart apache2
+        KeyName: !Ref KeyPairName
+
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: my-auto-scaling-group1  
+      LaunchTemplate:
+        LaunchTemplateId: !Ref MyLaunchTemplate
+        Version: !GetAtt MyLaunchTemplate.LatestVersionNumber
+      MinSize: 2
+      MaxSize: 2
+      TargetGroupARNs:
+        - !Ref TargetGroup1
+      VPCZoneIdentifier:
+        - subnet-058b88b8168ced8d5 
+        - subnet-08923ec41deec81e9 
+      HealthCheckType: "EC2"
+      HealthCheckGracePeriod: 900
+# EC2-Autoscaling end
+# ---------------------------------------------------------------------------------------------------------
+
+# EFS-Mount
+# ------------------------------------------------------------------------------------------------------------
+
+  MySecurityGroupEFS1:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Otvori samo sigurne portove za EFS
+      SecurityGroupIngress:
+        - SourceSecurityGroupId: !Ref MySecurityGroup1
+          IpProtocol: tcp
+          FromPort: 2049
+          ToPort: 2049
+      VpcId: vpc-0f8a463d3c84ab974
+      Tags: 
+        - Key: Name
+          Value: EFSSecurityGroup
+
+  MyEFSFileSystem:
+    Type: AWS::EFS::FileSystem
+    Properties:
+      KmsKeyId: !Ref EFSKMSKey
+      PerformanceMode: generalPurpose
+      Encrypted: true
+
+  MountTarget:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref MyEFSFileSystem
+      SubnetId: subnet-058b88b8168ced8d5
+      SecurityGroups:
+        - !Ref MySecurityGroupEFS1
+  
+  MountTarget2:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref MyEFSFileSystem
+      SubnetId: subnet-08923ec41deec81e9
+      SecurityGroups:
+        - !Ref MySecurityGroupEFS1
+# EFS-Mount end
+# ----------------------------------------------------------------------------------------------------
+
+# LoadBallancer
+# -------------------------------------------------------------------------------------------------- 
+  LoadBalancerSecurityGroup1:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security group for the ALB"
+      VpcId: vpc-0f8a463d3c84ab974
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: "0.0.0.0/0"
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: "0.0.0.0/0"
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: "0.0.0.0/0"
+      Tags: 
+        - Key: Name
+          Value: LBSecurityGroup
+
+  TargetGroup1:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: TargetGroup1
+      VpcId: vpc-0f8a463d3c84ab974
+      Port: 80
+      Protocol: HTTP
+      HealthCheckPath: /
+      HealthCheckIntervalSeconds: 60
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 5
+      UnhealthyThresholdCount: 3
+      Matcher:
+        HttpCode: '200'
+      TargetGroupAttributes:
+        - Key: stickiness.enabled
+          Value: true
+        - Key: stickiness.type
+          Value: lb_cookie
+        - Key: stickiness.lb_cookie.duration_seconds
+          Value: 3600
+      
+  LoadBalancer1:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Type: application
+      Scheme: internal
+      Subnets:
+        - subnet-058b88b8168ced8d5 
+        - subnet-08923ec41deec81e9 
+      SecurityGroups:
+        - !Ref LoadBalancerSecurityGroup1
+
+  LoadBalancerListener1:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer1
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup1
+
+# LoadBallancer end
+# --------------------------------------------------------------------------------------------------------
+
+# RDSInstance
+# -----------------------------------------------------------------------------------------------------------
+  MySecurityGroupRDS1:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Otvori samo sigurne portove za RDS
+      SecurityGroupIngress:
+        - SourceSecurityGroupId: !GetAtt MySecurityGroup1.GroupId
+          IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+      VpcId: vpc-0f8a463d3c84ab974
+      Tags: 
+        - Key: Name
+          Value: RDSSecurityGroup 
+
+  MyRDSSecrets:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: 'This is the secret for my RDS instance'
+      GenerateSecretString:
+        SecretStringTemplate: '{"username": "admin"}'
+        GenerateStringKey: 'password'
+        PasswordLength: 16
+        ExcludeCharacters: '"@/\' 
+
+  MyDBInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      KmsKeyId: !Ref RDSKMSKey1
+      AllocatedStorage: 20
+      DBInstanceClass: db.t3.micro
+      Engine: mysql
+      DBName: mydatabase
+      MultiAZ: false
+      DBSubnetGroupName: default-vpc-0f8a463d3c84ab974
+      MasterUsername: !Join ['', ['{{resolve:secretsmanager:', !Ref MyRDSSecrets, ':SecretString:username}}' ]]
+      MasterUserPassword: !Join ['', ['{{resolve:secretsmanager:', !Ref MyRDSSecrets, ':SecretString:password}}' ]]
+      BackupRetentionPeriod: 0
+      DBInstanceIdentifier: 'rds-instance-1' 
+      VPCSecurityGroups:
+        - !Ref MySecurityGroupRDS1
+      AvailabilityZone: eu-central-1b
+      StorageEncrypted: true
+
+# RDSInstance end
+# ---------------------------------------------------------------------------------------------------------------------
+
+# DNS-Records
+# ------------------------------------------------------------------------------------------------------------------------
+  MyDNSRecordLB1:
+    Type: AWS::Route53::RecordSetGroup  
+    Properties: 
+      HostedZoneId: Z06886521XUTFTL22VM0N
+      RecordSets: 
+        - Name: borislb1.team-c.internal 
+          Type: A 
+          AliasTarget: 
+            HostedZoneId: !GetAtt 'LoadBalancer1.CanonicalHostedZoneID' 
+            DNSName: !GetAtt 'LoadBalancer1.DNSName'
+  
+  MyDNSRecordDB1:
+    Type: AWS::Route53::RecordSetGroup  
+    Properties: 
+      HostedZoneId: Z06886521XUTFTL22VM0N
+      RecordSets: 
+        - Name: borisdb1.team-c.internal 
+          Type: CNAME  
+          TTL: 300  
+          ResourceRecords:  
+            - !GetAtt MyDBInstance.Endpoint.Address
+# Security-KMS
+# -------------------------------------------------------------------------------------------------------------------
+
+  EC2KMSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: KMS key for EC2 instance encryption
+      KeyPolicy:
+        Version: 2012-10-17
+        Id: key-default-1
+        Statement:
+          - Sid: Enable User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:role/team_c_admin_role
+            Action: kms:*
+            Resource: "*"
+          - Sid: Allow Autoscaling Group Access
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:role/aws-service-role/autoscaling.amazonaws.com/AWSServiceRoleForAutoScaling
+            Action: kms:*
+            Resource: "*"
+      PendingWindowInDays: 7
+
+  RDSKMSKey1:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: KMS key for RDS encryption
+      KeyPolicy:
+        Version: 2012-10-17
+        Id: key-default-1
+        Statement:
+          - Sid: Allow administration of the key
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:role/team_c_admin_role
+            Action:
+              - kms:Create*
+              - kms:Describe*
+              - kms:Enable*
+              - kms:List*
+              - kms:Put*
+              - kms:Update*
+              - kms:Revoke*
+              - kms:Disable*
+              - kms:Get*
+              - kms:Delete*
+              - kms:ScheduleKeyDeletion
+              - kms:CancelKeyDeletion
+            Resource: "*"
+          - Sid: Allow use of the key
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:root
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey
+              - kms:GenerateDataKeyWithoutPlaintext
+            Resource: "*"
+      PendingWindowInDays: 7
+
+  EFSKMSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: KMS key for EFS encryption
+      KeyPolicy:
+        Version: 2012-10-17
+        Id: key-default-1
+        Statement:
+          - Sid: Allow administration of the key
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:role/team_c_admin_role
+            Action:
+              - kms:Create*
+              - kms:Describe*
+              - kms:Enable*
+              - kms:List*
+              - kms:Put*
+              - kms:Update*
+              - kms:Revoke*
+              - kms:Disable*
+              - kms:Get*
+              - kms:Delete*
+              - kms:ScheduleKeyDeletion
+              - kms:CancelKeyDeletion
+            Resource: "*"
+          - Sid: Allow use of the key
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:root
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey
+              - kms:GenerateDataKeyWithoutPlaintext
+            Resource: "*"
+      PendingWindowInDays: 7
+# Security-KMS
+# -------------------------------------------------------------------------------------------------------------------
+

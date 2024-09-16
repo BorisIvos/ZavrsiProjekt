@@ -1,0 +1,122 @@
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'KMS Cross-Region Key Replica Example'
+
+Resources:
+  MyLambdaRole1:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Path: /
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - 's3:*'
+                  - 'rds:*'
+                  - 'kms:*'
+                  - 'events:PutTargets'
+                  - 'events:PutRule'
+                  - 'events:DescribeRule'
+                  - 'events:PutPermission'
+                  - 'events:RemoveTargets'
+                  - 'events:DeleteRule'
+                  - 'ssm:GetParameter'
+                  - 'ssm:PutParameter'
+                Resource: '*'
+
+  MyLambdaRoleSSMParameter:
+    Type: 'AWS::SSM::Parameter'
+    Properties:
+      Name: "/my/ssm/parameter/my-lambda-role-arn"
+      Type: String
+      Value: !GetAtt MyLambdaRole1.Arn
+
+  MyEventRule2:
+    Type: AWS::Events::Rule
+    Properties:
+      EventPattern:
+        source:
+          - "aws.rds"
+        detailType:
+          - "AWS API Call via CloudTrail"
+        detail:
+          eventSource:
+            - rds.amazonaws.com
+          eventName:
+            - CreateDBInstance
+      Targets:
+        - Arn: !GetAtt MyLambdaFunction.Arn
+          Id: "TargetFunctionV1"
+      Name: MyEventRule2
+
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt MyLambdaFunction.Arn
+      Action: "lambda:InvokeFunction"
+      Principal: "events.amazonaws.com"
+      SourceArn: !GetAtt MyEventRule2.Arn
+    DependsOn: MyEventRule2
+
+  MyLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Role: !GetAtt MyLambdaRole1.Arn
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Timeout: 300  
+      Code:
+        ZipFile: |
+          import boto3
+          import os
+
+          # Dodatna funkcija koja bi trebala biti implementirana
+          def delete_event_rule(rule_name):
+              # Implementirajte logiku za brisanje pravila događaja
+              pass
+
+          def lambda_handler(event, context):
+              rds_client = boto3.client('rds', region_name='eu-west-1')
+              ssm_client = boto3.client('ssm', region_name='eu-west-1')
+
+              source_db_instance_arn = "arn:aws:rds:eu-central-1:050572347738:db:rds-instance"
+              ssm_parameter_name = "/my/ssm/parameter/kms-key-arn"
+
+              try:
+                  # Dohvati vrijednost SSM parametra (KMS ključ ARN)
+                  kms_key_id = ssm_client.get_parameter(Name=ssm_parameter_name, WithDecryption=True)['Parameter']['Value']
+
+                  # Postavi parametre za automatsko stvaranje replika sigurnosnih kopija
+                  backup_retention_period = 7
+
+                  response = rds_client.start_db_instance_automated_backups_replication(
+                      SourceDBInstanceArn=source_db_instance_arn,
+                      KmsKeyId=kms_key_id,
+                      BackupRetentionPeriod=backup_retention_period
+                  )
+
+                  print(response)
+
+                  try:
+                      delete_event_rule("MyEventRule")
+                  except Exception as e:
+                      print(f"Error in Lambda handler: {str(e)}")
+
+              except Exception as e:
+                  print(f"Error retrieving SSM parameter: {str(e)}")
+      Environment:
+        Variables:
+          KMS_ARN: !Sub '{{resolve:ssm:/my/ssm/parameter/kms-key-arn}}'  # Access the SSM parameter directly
+      Tags:
+        - Key: Name 
+          Value: MyLambdaFunction
