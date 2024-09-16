@@ -1,0 +1,91 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: This template will create the resources needed in Ohio Region
+
+Resources:
+  # CMK Key for S3 encryption in Ohio region
+  MyKeyOhio:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: This is a CMK key for encrypting my S3 bucket
+      KeyPolicy:
+        Id: my_test_key
+        Version: '2012-10-17'
+        Statement:
+          - Sid: Allow administration of the key
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:role/team_c_admin_role
+            Action:
+              - kms:Create*
+              - kms:Describe*
+              - kms:Enable*
+              - kms:List*
+              - kms:Put*
+              - kms:Update*
+              - kms:Revoke*
+              - kms:Disable*
+              - kms:Get*
+              - kms:Delete*
+              - kms:ScheduleKeyDeletion
+              - kms:CancelKeyDeletion
+            Resource: '*'
+          - Sid: Allow use of the key
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:root
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey
+              - kms:GenerateDataKeyWithoutPlaintext
+            Resource: '*'
+      Tags:
+        - Key: Name
+          Value: Test_Key
+
+  # S3 Bucket for replication
+  MyBucketTestOhio:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: my-test-bucket-ohio-replication
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              KMSMasterKeyID: !Ref MyKeyOhio
+              SSEAlgorithm: aws:kms
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: True
+        BlockPublicPolicy: False
+        IgnorePublicAcls: True
+        RestrictPublicBuckets: True
+      Tags:
+        - Key: Name
+          Value: my-test-bucket-ohio-replication
+
+  # S3 Bucket Policy for my-test-bucket-ohio-replication
+  MyBucketTestOhioBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref MyBucketTestOhio
+      PolicyDocument:
+        Statement:
+          - Sid: AllowSSLRequestsOnly
+            Action: s3:*
+            Effect: Deny
+            Resource:
+              - !Sub 'arn:aws:s3:::${MyBucketTestOhio}'
+              - !Sub 'arn:aws:s3:::${MyBucketTestOhio}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+            Principal: "*"
+          - Sid: PublicReadForGetBucketObjects
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: "*"
+            Resource:
+              - !Sub 'arn:aws:s3:::${MyBucketTestOhio}'

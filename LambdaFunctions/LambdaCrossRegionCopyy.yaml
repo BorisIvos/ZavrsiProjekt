@@ -1,0 +1,151 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'KMS Cross-Region Key Replica Example'
+
+Resources:
+  MyLambdaRole1:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Path: /
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - 's3:*'
+                  - 'rds:*'
+                  - 'kms:*'
+                  - 'events:PutTargets'
+                  - 'events:PutRule'
+                  - 'events:DescribeRule'
+                  - 'events:PutPermission'
+                  - 'events:RemoveTargets'
+                  - 'events:DeleteRule'
+                  - 'ssm:GetParameter'
+                  - 'ssm:PutParameter'
+                Resource: '*'
+
+
+  MyEventRule1:
+    Type: AWS::Events::Rule
+    Properties:
+      EventPattern:
+        source:
+          - "aws.rds"
+        detailType:
+          - "RDS DB Instance Event"
+        detail:
+          EventCategories:
+            - "Backup"
+            - "Configuration Change"
+            - "Creation"
+            - "Deletion"
+            - "Failover"
+            - "Maintenance"
+            - "Notification"
+            - "Recovery"
+            - "Restore"
+            - "Snapshot"
+      ScheduleExpression: "cron(0/1 * * * ? *)" 
+      Targets:
+        - Arn: !GetAtt MyLambdaFunction1.Arn
+          Id: "TargetFunctionV1"
+      Name: MyEventRule1
+
+  # MyEventRule:
+  #   Type: AWS::Events::Rule
+  #   Properties:
+  #     EventPattern:
+  #       source:
+  #         - "aws.rds"
+  #       detailType:
+  #         - "AWS API Call via CloudTrail"
+  #       detail:
+  #         eventSource:
+  #           - rds.amazonaws.com
+  #         eventName:
+  #           - CreateDBInstance
+  #     Targets:
+  #       - Arn: !GetAtt MyLambdaFunction.Arn
+  #         Id: "TargetFunctionV1"
+  #     Name: MyEventRule
+
+
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt MyLambdaFunction1.Arn
+      Action: "lambda:InvokeFunction"
+      Principal: "events.amazonaws.com"
+      SourceArn: !GetAtt MyEventRule1.Arn
+    DependsOn: MyEventRule1
+
+  MyLambdaFunction1:
+    Type: AWS::Lambda::Function
+    Properties:
+      Role: !GetAtt MyLambdaRole1.Arn
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Timeout: 300  
+      Code:
+        ZipFile: |
+          import boto3
+          
+          def lambda_handler(event, context):
+              source_region = 'eu-west-1'
+              destination_region = 'eu-central-1'
+              source_parameter_name = '/my/ssm/parameter/kms-key-arn'
+              destination_parameter_name = '/my/ssm/parameter/kms-key-arn'
+
+              # Create AWS clients for both source and destination regions
+              ssm_source = boto3.client('ssm', region_name=source_region)
+              ssm_destination = boto3.client('ssm', region_name=destination_region)
+
+              try:
+                  # Retrieve parameter from the source region
+                  response = ssm_source.get_parameter(Name=source_parameter_name, WithDecryption=True)
+                  source_parameter_value = response['Parameter']['Value']
+
+                  # Put parameter in the destination region
+                  ssm_destination.put_parameter(
+                      Name=destination_parameter_name,
+                      Description=f"SSM parameter copied from {source_region} to {destination_region}",
+                      Type='String',
+                      Value=source_parameter_value,
+                      Overwrite=True
+                  )
+
+                  return {
+                      'statusCode': 200,
+                      'body': 'SSM parameter copied successfully.'
+                  }
+
+              except Exception as e:
+                  error_message = f"Error copying SSM parameter: {str(e)}"
+                  print(error_message)
+                  return {
+                      'statusCode': 500,
+                      'body': error_message
+                  }
+      Tags:
+        - Key: Name 
+          Value: MyLambdaFunction1
+  
+
+  KMSKeyArnParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: "/my/ssm/parameter/kms-key-arn"
+      Description: "SSM parameter for KMS Key ARN"
+      Type: "String"
+      Value: " "  # Prazan string
+  
+ 

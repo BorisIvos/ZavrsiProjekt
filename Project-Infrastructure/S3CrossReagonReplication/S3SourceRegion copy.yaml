@@ -1,0 +1,184 @@
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'KMS Cross-Region Key Replica Example'
+
+Parameters:
+  SourceBucketName:
+    Type: String
+    Description: 'Name for the source bucket'
+    Default: 'kanta12'
+
+  DestinationBucketName:
+    Type: String
+    Description: 'Name for the destination bucket'
+    Default: 'my-test-bucket-ohio-replication'
+
+  DestinationRegion:
+    Type: String
+    Description: 'Region for the destination bucket'
+    Default: 'eu-west-1'
+
+Resources:
+  S3KMSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: KMS Key for S3
+      PendingWindowInDays: 7
+      Enabled: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Id: key-default-1
+        Statement:
+          - Sid: root-access
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:root
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: s3-admin-access
+            Effect: Allow
+            Principal:
+              AWS: !GetAtt AdminIAMRole.Arn
+            Action:
+              - 'kms:Decrypt'
+            Resource: '*'
+      PendingWindowInDays: 7
+
+  SourceBucketRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Principal:
+              Service: 's3.amazonaws.com'
+            Action: 'sts:AssumeRole'
+
+  SourceBucketPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: 'source-bucket-replication-permissions'
+      Roles:
+        - Ref: 'SourceBucketRole'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Action:
+              - 's3:GetObjectVersionForReplication'
+              - 's3:GetObjectVersionAcl'
+            Resource:
+              - !Sub 'arn:aws:s3:::${SourceBucketName}/*'
+          - Effect: 'Allow'
+            Action:
+              - 's3:ListBucket'
+              - 's3:GetReplicationConfiguration'
+            Resource:
+              - !Sub 'arn:aws:s3:::${SourceBucketName}'
+          - Effect: 'Allow'
+            Action:
+              - 's3:ReplicateObject'
+              - 's3:ReplicateDelete'
+              - 's3:ReplicateTags'
+              - 's3:GetObjectVersionTagging'
+            Resource: !Sub 'arn:aws:s3:::${DestinationBucketName}/*'
+
+  SourceBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref SourceBucketName
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !GetAtt S3KMSKey.Arn
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: 's3:ObjectCreated:*'
+            Function: !GetAtt AppendItemToListFunction.Arn
+      VersioningConfiguration:
+        Status: 'Enabled'
+      ReplicationConfiguration:
+        Role: !GetAtt SourceBucketRole.Arn
+        Rules:
+          - Destination:
+              Bucket: !Sub "arn:aws:s3:::${DestinationBucketName}"
+            Prefix: ""
+            Status: Enabled
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: LambdaExecutionPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: 'logs:*'
+                Resource: 'arn:aws:logs:*:*:*'
+
+  AppendItemToListFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          exports.handler = async (event) => {
+            console.log('Hello, World!');
+            return {
+              statusCode: 200,
+              body: JSON.stringify('Hello, World!'),
+            };
+          };
+      Runtime: nodejs18.x
+
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    DependsOn: LambdaExecutionRole
+    Properties:
+      FunctionName: !GetAtt AppendItemToListFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: s3.amazonaws.com
+      SourceAccount: !Ref 'AWS::AccountId'
+      SourceArn: 
+        Fn::Sub: "arn:aws:s3:::${SourceBucketName}-encryption-service"
+  
+  AdminIAMRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: administrator
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: s3.amazonaws.com
+            Action: sts:AssumeRole
+
+  S3AdministratorPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: S3AdministratorPolicy
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AdministratorAccessForS3Bucket
+            Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+              - s3:DeleteObject
+            Resource:
+              - !Sub 'arn:aws:s3:::${SourceBucketName}/*'
+      Roles:
+        - !Ref AdminIAMRole
